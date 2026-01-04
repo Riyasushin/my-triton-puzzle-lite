@@ -220,6 +220,7 @@ def add_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
     tl.store(z_ptr + off_x, x)
     return
 
+###############################################################################################
 
 r"""
 ## Puzzle 2: Constant Add Block
@@ -247,6 +248,7 @@ def add_mask2_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
     tl.store(z_ptr + offsets, x, mask=mask)
     return
 
+###############################################################################################
 
 r"""
 ## Puzzle 3: Outer Vector Add
@@ -268,8 +270,19 @@ def add_vec_spec(x: Float32[32,], y: Float32[32,]) -> Float32[32, 32]:
 @triton.jit
 def add_vec_kernel(x_ptr, y_ptr, z_ptr, N0, N1, B0: tl.constexpr, B1: tl.constexpr):
     # Finish me!
+    # 因块大小 B0=N0、B1=N1，无需掩码处理边界
+    off_x = tl.arange(0, B0)
+    off_y = tl.arange(0, B1)
+    off_z = off_y[:, None] * B0 + off_x[None, :]
+    # B1 == N1, no mask
+    x = tl.load(x_ptr + off_x)
+    y = tl.load(y_ptr + off_y)
+    z = x[None, :] + y[:, None]
+    tl.store(z_ptr + off_z, z)
     return
+    
 
+###############################################################################################
 
 r"""
 ## Puzzle 4: Outer Vector Add Block
@@ -295,8 +308,21 @@ def add_vec_block_kernel(
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
     # Finish me!
+    off_x = block_id_x * B0 + tl.arange(0, B0)
+    off_y = block_id_y * B1 + tl.arange(0, B1)
+    off_z = off_y[:, None] * N0 + off_x[None, :]
+    mask_x = off_x < N0
+    mask_y = off_y < N1
+    mask_z = mask_x[None, :] & mask_y[:, None]
+
+    x = tl.load(x_ptr + off_x, mask=mask_x)
+    y = tl.load(y_ptr + off_y, mask=mask_y)
+    z = x[None, :] + y[:,None]
+    tl.store(z_ptr + off_z, z,mask=mask_z)
     return
 
+
+###############################################################################################
 
 r"""
 ## Puzzle 5: Fused Outer Multiplication
@@ -322,7 +348,20 @@ def mul_relu_block_kernel(
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
     # Finish me!
+    off_x = block_id_x * B0 + tl.arange(0, B0)
+    off_y = block_id_y * B1 + tl.arange(0, B1)
+    off_z = off_y[:, None] * N0 + off_x[None, :]
+    mask_x = off_x < N0
+    mask_y = off_y < N1
+    mask_z = mask_x[None, :] & mask_y[:, None]
+    x = tl.load(x_ptr + off_x, mask=mask_x)
+    y = tl.load(y_ptr + off_y, mask=mask_y)
+    z = x[None, :] * y[:,None]
+    relu_z = tl.where(z > 0, z, 0.0)
+    tl.store(z_ptr + off_z, relu_z,mask=mask_z)
     return
+
+###############################################################################################
 
 
 r"""
@@ -362,8 +401,23 @@ def mul_relu_block_back_kernel(
     block_id_i = tl.program_id(0)
     block_id_j = tl.program_id(1)
     # Finish me!
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    off_j = block_id_j * B1 + tl.arange(0, B1)
+    off_ji = off_j[:, None] * N0 + off_i[None, :]
+    mask_i = off_i < N0
+    mask_j = off_j < N1
+    mask_ji = mask_j[:, None] & mask_i[None, :]
+    x = tl.load(x_ptr + off_ji, mask=mask_ji)
+    y = tl.load(y_ptr + off_j, mask=mask_j)
+    dz = tl.load(dz_ptr + off_ji, mask=mask_ji)
+    
+    df = tl.where(x * y[:, None] > 0, 1.0, 0.0)
+    dxy_x = y[:, None]
+    dx = df * dxy_x * dz
+    tl.store(dx_ptr + off_ji, dx, mask=mask_ji)
     return
 
+###############################################################################################
 
 r"""
 ## Puzzle 7: Long Sum
@@ -387,8 +441,25 @@ def sum_spec(x: Float32[4, 200]) -> Float32[4,]:
 @triton.jit
 def sum_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     # Finish me!
+    block_id_i = tl.program_id(0)
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+    z = tl.zeros([B0], dtype=tl.float32)
+    for id_j in tl.range(0, T, B1):
+        off_j = id_j + tl.arange(0, B1)
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_j = off_j < T
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        z += tl.sum(x, axis=1)
+    tl.store(z_ptr + off_i, z, mask=mask_i)
     return
-
+    
+    
+    
+    
+###############################################################################################
+# TODO
 
 r"""
 ## Puzzle 8: Long Softmax
@@ -427,18 +498,123 @@ def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     """2 loops ver."""
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
-    # Finish me!
+
+    # 计算这一块负责的行索引 off_i: [block_id_i * B0, ..., block_id_i * B0 + B0 - 1]
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    # 有些 program 可能会跑到 N0 之后（越界），用 mask_i 标记有效行
+    mask_i = off_i < N0
+    
+    # 为这一块的每行准备三个中间变量：
+    # x_max: 每行当前的最大值（第一遍 loop 更新）
+    # exp_sum: 每行 exp(x - x_max) 之和（第二遍 loop 更新）
+    # new_x_max 用来动态更新，算差更新 exp_sum
+    exp_sum = tl.zeros([B0], dtype=tl.float32)
+    x_max = tl.full([B0], -float("inf"), dtype=tl.float32)
+    new_x_max = tl.full((B0,), -float("inf"), dtype=tl.float32)
+    
+    # Loop 1: 找每一行的最大值 x_max[i]和 exp_sum
+    # 思路：online更新的方法去做
+    #  对 tile 在 axis=1 做 max，然后和当前的 x_max 做 maximum。
+    for id_j in tl.range(0, T, B1):
+        off_j = id_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        
+        # online softmax
+        new_x_max = tl.maximum(x_max, tl.max(x, axis=1))
+        new_exp_x = tl.exp2(log2_e * (x - new_x_max[:, None]))
+        factor = tl.exp2(log2_e * (x_max - new_x_max))
+        exp_sum = exp_sum * factor + tl.sum(new_exp_x, axis=1)
+        x_max = new_x_max
+        
+          
+    
+    # Loop 2: 再扫一遍，写出最终 softmax
+    # 目标：z_ij = exp(x_ij - x_max[i]) / exp_sum[i]
+    for id_j in tl.range(0, T, B1):
+        off_j = id_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        exp_x = tl.exp2(log2_e * (x - x_max[:, None])) # 为什么exp2 而不是exp
+        z = exp_x / exp_sum[:, None]
+        tl.store(z_ptr + off_ij, z, mask=mask_ij)   
+    
+
+
     return
 
 
 @triton.jit
 def softmax_kernel_brute_force(
-    x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr
+    x_ptr,            # 指向输入矩阵 x 的一维扁平内存，shape 逻辑上是 [N0, T]
+    z_ptr,            # 指向输出矩阵 z 的一维扁平内存，shape 逻辑上也是 [N0, T]
+    N0,               # batch 大小：行数（比如 4）
+    N1,               # 这里其实没用到（有些 puzzle 里是第二个维度用的，这里是 T）
+    T,                # 每一行的长度（比如 200）
+    B0: tl.constexpr, # 行方向 block size：每个 program 一次处理多少行
+    B1: tl.constexpr  # 列方向 block size：每个 program 每次 loop 处理多少列元素
 ):
     """3 loops ver."""
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
-    # Finish me!
+    
+    # 计算这一块负责的行索引 off_i: [block_id_i * B0, ..., block_id_i * B0 + B0 - 1]
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    # 有些 program 可能会跑到 N0 之后（越界），用 mask_i 标记有效行
+    mask_i = off_i < N0
+    
+    
+    # 为这一块的每行准备两个中间变量：
+    # x_max: 每行当前的最大值（第一遍 loop 更新）
+    # exp_sum: 每行 exp(x - x_max) 之和（第二遍 loop 更新）
+    exp_sum = tl.zeros([B0], dtype=tl.float32)
+    x_max = tl.full([B0], -float("inf"), dtype=tl.float32)
+    
+    # Loop 1: 找每一行的最大值 x_max[i]
+    # 思路：列方向按块扫描，每次读取一个 [B0, B1] 的 tile，
+    #  对 tile 在 axis=1 做 max，然后和当前的 x_max 做 maximum。
+    for id_j in tl.range(0, T, B1):
+        off_j = id_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        x_max = tl.maximum(x_max, tl.max(x, axis=1))   
+    
+    
+    # Loop 2: 在已知 x_max 的前提下，累加 exp(x - x_max)
+    # 目标：exp_sum[i] = Σ_j exp(x_ij - x_max[i])
+    for id_j in tl.range(0, T, B1):
+        off_j = id_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        exp_x = tl.exp2(log2_e * (x - x_max[:, None])) # 为什么exp2 而不是exp
+        exp_sum += tl.sum(exp_x, axis=1)
+    
+    
+    # Loop 3: 再扫一遍，写出最终 softmax
+    # 目标：z_ij = exp(x_ij - x_max[i]) / exp_sum[i]
+    for id_j in tl.range(0, T, B1):
+        off_j = id_j + tl.arange(0, B1)
+        mask_j = off_j < T
+        
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        exp_x = tl.exp2(log2_e * (x - x_max[:, None])) # 为什么exp2 而不是exp
+        z = exp_x / exp_sum[:, None]
+        tl.store(z_ptr + off_ij, z, mask=mask_ij)   
+    
     return
 
 
@@ -725,6 +901,14 @@ def run_puzzles(args, puzzles: List[int]):
         print("Puzzle #8:")
         ok = test(
             softmax_kernel,
+            softmax_spec,
+            B={"B0": 1, "B1": 32},
+            nelem={"N0": 4, "N1": 32, "T": 200},
+            print_log=print_log,
+            device=device,
+        )
+        ok = ok and test(
+            softmax_kernel_brute_force,
             softmax_spec,
             B={"B0": 1, "B1": 32},
             nelem={"N0": 4, "N1": 32, "T": 200},

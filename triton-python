@@ -1,0 +1,3 @@
+#!/bin/bash
+# 传递所有参数给 python3（例如 triton-python script.py 会执行 TRITON_INTERPRET=1 python3 script.py）
+TRITON_INTERPRET=1 python3 puzzles.py "$@"
